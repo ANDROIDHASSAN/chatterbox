@@ -4,6 +4,8 @@ import numpy as np
 import torch
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES
 import gradio as gr
+import urllib.request
+import tempfile
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 T3_MODEL = os.getenv("CHATTERBOX_MULTILINGUAL_T3_MODEL", "v2")
