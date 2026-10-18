@@ -1,6 +1,10 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import tempfile
+import urllib.request
+from urllib.parse import urlparse
 
 import librosa
 import torch
@@ -16,6 +20,37 @@ from .models.s3gen import S3GEN_SR, S3Gen
 from .models.tokenizers import MTLTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
+
+
+ALLOWED_REFERENCE_WAV_HOSTS = {"storage.googleapis.com"}
+"""Hosts a remote reference-wav URL may be downloaded from. Without this,
+prepare_conditionals() would fetch any server-reachable URL a caller passes it."""
+
+
+@contextmanager
+def _local_wav_path(wav_fpath):
+    """Yield a local path for wav_fpath, downloading it first if it's a URL.
+
+    Rejects a URL whose host isn't in ALLOWED_REFERENCE_WAV_HOSTS. Any temp file
+    created for a download is removed when the context exits, success or not.
+    """
+    if not wav_fpath.startswith(("http://", "https://")):
+        yield wav_fpath
+        return
+
+    hostname = urlparse(wav_fpath).hostname
+    if hostname is None or hostname.lower() not in ALLOWED_REFERENCE_WAV_HOSTS:
+        raise ValueError(f"Disallowed hostname: {hostname}")
+
+    # delete=False: urlretrieve and librosa.load each open this path by name, which
+    # a NamedTemporaryFile with delete=True cannot be reopened for on Windows.
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    temp_file.close()
+    try:
+        urllib.request.urlretrieve(wav_fpath, temp_file.name)
+        yield temp_file.name
+    finally:
+        os.unlink(temp_file.name)
 
 
 REPO_ID = "ResembleAI/chatterbox"
@@ -251,27 +286,7 @@ class ChatterboxMultilingualTTS:
         return cls.from_local(ckpt_dir, device, t3_model=t3_model)
     
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
-        # Handle remote URLs by downloading to temporary file
-        local_path = wav_fpath
-        temp_file = None
-        if wav_fpath.startswith(('http://', 'https://')):
-            import urllib.request
-            import tempfile
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-            try:
-                urllib.request.urlretrieve(wav_fpath, temp_file.name)
-                local_path = temp_file.name
-            except Exception:
-                # Clean up temp file on failure
-                try:
-                    temp_file.close()
-                    import os
-                    os.unlink(temp_file.name)
-                except:
-                    pass
-                raise
-
-        try:
+        with _local_wav_path(wav_fpath) as local_path:
             ## Load reference wav
             s3gen_ref_wav, _sr = librosa.load(local_path, sr=S3GEN_SR)
 
@@ -297,15 +312,6 @@ class ChatterboxMultilingualTTS:
                 emotion_adv=exaggeration * torch.ones(1, 1, 1),
             ).to(device=self.device)
             self.conds = Conditionals(t3_cond, s3gen_ref_dict)
-        finally:
-            # Clean up temporary file if we created one
-            if temp_file is not None:
-                try:
-                    temp_file.close()
-                    import os
-                    os.unlink(temp_file.name)
-                except:
-                    pass
 
     def generate(
         self,
